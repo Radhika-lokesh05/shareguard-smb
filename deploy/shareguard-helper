@@ -1,0 +1,357 @@
+#!/usr/bin/env python3
+"""deploy/shareguard-helper – Privileged root-owned firewall & session helper for ShareGuard.
+
+Standard library only. Designed to run via sudo with strict parameter validation.
+Only touches the 'shareguard' nftables table/tag.
+
+Subcommands:
+    block <ip> <ttl_seconds> [--dry-run]
+    unblock <ip> [--dry-run]
+    list
+    flush [--dry-run]
+    kill-sessions <ip> [--dry-run]
+
+Security:
+- Validates all IP addresses strictly using ipaddress (no CIDRs, no loopback, no shell injection).
+- Validates TTL range (10s <= TTL <= 86400s).
+- Never uses shell=True.
+- Drops traffic on SMB ports 139 and 445 only.
+"""
+
+from __future__ import annotations
+
+import argparse
+import ipaddress
+import json
+import logging
+import re
+import subprocess
+import sys
+
+NFT_FAMILY = "inet"
+NFT_TABLE = "shareguard"
+NFT_SET_V4 = "blocked_ips"
+NFT_SET_V6 = "blocked_ips_v6"
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [shareguard-helper] %(levelname)s: %(message)s",
+)
+logger = logging.getLogger("shareguard-helper")
+
+
+def validate_ip(ip_str: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
+    """Validate IP strictly; reject injection strings, subnets, and loopback."""
+    clean = ip_str.strip()
+    if not clean or "/" in clean or re.search(r"[;&|`$<>\r\n ]", clean):
+        raise ValueError(f"Invalid host IP or forbidden characters: {ip_str!r}")
+    try:
+        addr = ipaddress.ip_address(clean)
+    except ValueError as e:
+        raise ValueError(f"Invalid IP address: {ip_str!r}: {e}") from e
+
+    if addr.is_loopback:
+        raise ValueError(f"Refusing to operate on loopback address: {addr}")
+    if addr.is_multicast:
+        raise ValueError(f"Refusing to operate on multicast address: {addr}")
+    if addr.is_unspecified:
+        raise ValueError(f"Refusing to operate on unspecified address: {addr}")
+    if addr.is_link_local:
+        raise ValueError(f"Refusing to operate on link-local address: {addr}")
+    return addr
+
+
+def run_cmd(cmd: list[str], dry_run: bool = False) -> subprocess.CompletedProcess[str]:
+    """Execute command safely with shell=False."""
+    if dry_run:
+        logger.info("[DRY RUN] %s", " ".join(cmd))
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+    return subprocess.run(cmd, capture_output=True, text=True, check=False)  # noqa: S603
+
+
+def init_nftables(dry_run: bool = False) -> None:
+    """Ensure table, sets, and chains exist for both IPv4 and IPv6."""
+    run_cmd(["nft", "add", "table", NFT_FAMILY, NFT_TABLE], dry_run)
+    # IPv4 set
+    run_cmd(
+        [
+            "nft",
+            "add",
+            "set",
+            NFT_FAMILY,
+            NFT_TABLE,
+            NFT_SET_V4,
+            "{",
+            "type",
+            "ipv4_addr;",
+            "flags",
+            "timeout;",
+            "}",
+        ],
+        dry_run,
+    )
+    # IPv6 set
+    run_cmd(
+        [
+            "nft",
+            "add",
+            "set",
+            NFT_FAMILY,
+            NFT_TABLE,
+            NFT_SET_V6,
+            "{",
+            "type",
+            "ipv6_addr;",
+            "flags",
+            "timeout;",
+            "}",
+        ],
+        dry_run,
+    )
+    run_cmd(
+        [
+            "nft",
+            "add",
+            "chain",
+            NFT_FAMILY,
+            NFT_TABLE,
+            "prerouting",
+            "{",
+            "type",
+            "filter",
+            "hook",
+            "prerouting",
+            "priority",
+            "-150;",
+            "policy",
+            "accept;",
+            "}",
+        ],
+        dry_run,
+    )
+    # IPv4 drop rule
+    run_cmd(
+        [
+            "nft",
+            "add",
+            "rule",
+            NFT_FAMILY,
+            NFT_TABLE,
+            "prerouting",
+            "ip",
+            "saddr",
+            f"@{NFT_SET_V4}",
+            "tcp",
+            "dport",
+            "{",
+            "139,",
+            "445",
+            "}",
+            "drop",
+        ],
+        dry_run,
+    )
+    # IPv6 drop rule
+    run_cmd(
+        [
+            "nft",
+            "add",
+            "rule",
+            NFT_FAMILY,
+            NFT_TABLE,
+            "prerouting",
+            "ip6",
+            "saddr",
+            f"@{NFT_SET_V6}",
+            "tcp",
+            "dport",
+            "{",
+            "139,",
+            "445",
+            "}",
+            "drop",
+        ],
+        dry_run,
+    )
+
+
+def cmd_block(ip_str: str, ttl: int, dry_run: bool = False) -> int:
+    addr = validate_ip(ip_str)
+    if not (10 <= ttl <= 86400):
+        raise ValueError(f"TTL must be between 10 and 86400 seconds, got {ttl}")
+
+    init_nftables(dry_run=dry_run)
+    set_name = NFT_SET_V6 if isinstance(addr, ipaddress.IPv6Address) else NFT_SET_V4
+    cmd = [
+        "nft",
+        "add",
+        "element",
+        NFT_FAMILY,
+        NFT_TABLE,
+        set_name,
+        "{",
+        str(addr),
+        "timeout",
+        f"{ttl}s",
+        "}",
+    ]
+    res = run_cmd(cmd, dry_run=dry_run)
+    if res.returncode != 0:
+        logger.error("Failed to block %s: %s", addr, res.stderr)
+        return res.returncode
+    logger.info("Blocked %s for %ds on SMB ports 139/445", addr, ttl)
+    return 0
+
+
+def cmd_unblock(ip_str: str, dry_run: bool = False) -> int:
+    addr = validate_ip(ip_str)
+    set_name = NFT_SET_V6 if isinstance(addr, ipaddress.IPv6Address) else NFT_SET_V4
+    cmd = [
+        "nft",
+        "delete",
+        "element",
+        NFT_FAMILY,
+        NFT_TABLE,
+        set_name,
+        "{",
+        str(addr),
+        "}",
+    ]
+    res = run_cmd(cmd, dry_run=dry_run)
+    if res.returncode != 0:
+        logger.warning("Unblock %s completed with code %d: %s", addr, res.returncode, res.stderr)
+    else:
+        logger.info("Unblocked %s", addr)
+    return res.returncode
+
+
+def cmd_list() -> int:
+    res = run_cmd(["nft", "list", "table", NFT_FAMILY, NFT_TABLE])
+    if res.returncode == 0:
+        print(res.stdout)
+    else:
+        print("No active ShareGuard table or nftables not running.")
+    return res.returncode
+
+
+def cmd_flush(dry_run: bool = False) -> int:
+    cmd = ["nft", "delete", "table", NFT_FAMILY, NFT_TABLE]
+    res = run_cmd(cmd, dry_run=dry_run)
+    logger.info("Flushed table %s %s", NFT_FAMILY, NFT_TABLE)
+    return res.returncode
+
+
+def cmd_kill_sessions(ip_str: str, dry_run: bool = False) -> int:
+    addr = validate_ip(ip_str)
+    clean_ip = str(addr)
+
+    # Query smbstatus --json
+    res = run_cmd(["smbstatus", "--json"])
+    pids: list[int] = []
+    if res.returncode == 0 and res.stdout:
+        try:
+            data = json.loads(res.stdout)
+            sessions = data.get("sessions", {})
+            if isinstance(sessions, dict):
+                for pid_str, sess in sessions.items():
+                    remote = sess.get("remote_machine", "") or sess.get("ip", "")
+                    if clean_ip in str(remote):
+                        pids.append(int(pid_str))
+        except Exception as e:
+            logger.debug("Failed parsing smbstatus JSON: %s", e)
+
+    # Fallback to smbstatus -p
+    if not pids:
+        res_p = run_cmd(["smbstatus", "-p"])
+        if res_p.returncode == 0 and res_p.stdout:
+            for line in res_p.stdout.splitlines():
+                parts = line.split()
+                if len(parts) >= 4 and parts[0].isdigit():
+                    pid = int(parts[0])
+                    machine_field = " ".join(parts[3:])
+                    if clean_ip in machine_field:
+                        pids.append(pid)
+
+    # Safety verification: ensure every PID is strictly an smbd process
+    verified_pids: list[int] = []
+    for pid in pids:
+        if pid <= 1:
+            continue
+        if dry_run:
+            verified_pids.append(pid)
+            continue
+        # Verify /proc/<pid>/comm or ps
+        try:
+            comm_file = Path(f"/proc/{pid}/comm")
+            if comm_file.exists():
+                comm = comm_file.read_text().strip().lower()
+                if "smbd" in comm:
+                    verified_pids.append(pid)
+                else:
+                    logger.warning("Refusing to terminate PID %d: process name is '%s', not smbd", pid, comm)
+                continue
+        except Exception:
+            pass
+        # Fallback verification via ps
+        chk_proc = run_cmd(["ps", "-p", str(pid), "-o", "comm="])
+        if chk_proc.returncode == 0 and "smbd" in chk_proc.stdout.strip().lower():
+            verified_pids.append(pid)
+        else:
+            logger.warning("Refusing to terminate PID %d: not verified as smbd", pid)
+
+    if not verified_pids:
+        logger.info("No active verified smbd processes found for IP %s", clean_ip)
+        return 0
+
+    logger.info("Terminating verified smbd PIDs for %s: %s", clean_ip, verified_pids)
+    for pid in verified_pids:
+        run_cmd(["kill", "-TERM", str(pid)], dry_run=dry_run)
+        # Verify and kill -KILL if still running
+        chk = run_cmd(["kill", "-0", str(pid)])
+        if chk.returncode == 0:
+            run_cmd(["kill", "-KILL", str(pid)], dry_run=dry_run)
+
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="ShareGuard privileged firewall & session helper")
+    parser.add_argument("--dry-run", action="store_true", help="Log commands without executing")
+
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    block_parser = subparsers.add_parser("block", help="Block client on SMB ports")
+    block_parser.add_argument("ip", help="Client IPv4 or IPv6 address")
+    block_parser.add_argument("ttl", type=int, help="Block duration in seconds")
+
+    unblock_parser = subparsers.add_parser("unblock", help="Unblock client")
+    unblock_parser.add_argument("ip", help="Client IPv4 or IPv6 address")
+
+    subparsers.add_parser("list", help="List active ShareGuard nftables rules")
+    subparsers.add_parser("flush", help="Flush all ShareGuard nftables rules")
+
+    kill_parser = subparsers.add_parser("kill-sessions", help="Terminate client smbd sessions")
+    kill_parser.add_argument("ip", help="Client IPv4 or IPv6 address")
+
+    args = parser.parse_args()
+
+    try:
+        if args.command == "block":
+            return cmd_block(args.ip, args.ttl, dry_run=args.dry_run)
+        if args.command == "unblock":
+            return cmd_unblock(args.ip, dry_run=args.dry_run)
+        if args.command == "list":
+            return cmd_list()
+        if args.command == "flush":
+            return cmd_flush(dry_run=args.dry_run)
+        if args.command == "kill-sessions":
+            return cmd_kill_sessions(args.ip, dry_run=args.dry_run)
+    except ValueError as err:
+        logger.error("Security validation failed: %s", err)
+        return 2
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,11 @@
+# ShareGuard Lab Configuration
+# Safety: allowed_target_prefix must be explicitly configured to opt-in.
+# An empty string REFUSES all operations by default.
+# Example for Windows mapped SMB drive: "Z:\\sgtest" or "Z:/sgtest"
+allowed_target_prefix: ""
+
+# Default pause between collection runs in seconds to avoid event overlap in server logs
+pause_between_runs_seconds: 5.0
+
+# Client machine name as seen by Samba audit logs
+client_machine_name: "client-pc"

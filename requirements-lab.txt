@@ -1,0 +1,10 @@
+# requirements-lab.txt – Lab-client-only dependencies
+#
+# Install ONLY on the Ubuntu collection client VM, not on the server or in CI.
+#
+#   pip install -r requirements-lab.txt
+#
+# The main project requirements.txt is NOT needed for lab scripts alone.
+
+# Real encryption so generated ciphertext has high entropy.
+cryptography>=43.0.0

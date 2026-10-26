@@ -1,0 +1,10 @@
+# /etc/sudoers.d/shareguard – ShareGuard privileged helper permissions
+#
+# Allows the shareguard service user to run ONLY the dedicated helper script
+# as root without requiring a password.
+#
+# Security properties:
+# - Exact binary path only: no wildcards, no arbitrary command execution.
+# - The helper re-validates all arguments and operates strictly on the 'shareguard' nftables table.
+
+shareguard ALL=(root) NOPASSWD: /usr/local/bin/shareguard-helper

@@ -1,0 +1,99 @@
+# ShareGuard – Default Configuration
+# Override any value with an environment variable using the pattern:
+#   SHAREGUARD__<SECTION>__<KEY>=value
+# No secrets belong in this file.
+
+server:
+  host: "127.0.0.1"
+  port: 8000
+  debug: false
+  mode: "simulation"          # "simulation" | "live"
+
+samba:
+  audit_log_path: "lab/sample_audit.log"
+  share_root: "/srv/shares/Finance"   # default share root
+  shares:
+    Finance: "/srv/shares/Finance"
+  poll_interval_seconds: 1
+
+canary:
+  registry_path: "config/canaries.json"
+  allowlist:
+    - "192.168.1.250"          # backup daemon
+
+detection:
+  window_seconds: 60            # sliding window for feature aggregation
+  suspicious_threshold: 0.6     # ML probability threshold for NORMAL -> SUSPICIOUS
+  attack_threshold: 0.85        # ML/rule score threshold for SUSPICIOUS -> ATTACK
+  quiet_windows_to_normal: 3    # consecutive quiet windows to return to NORMAL
+  attack_resolve_minutes: 15    # quiet minutes before auto-resolving ATTACK
+  # Rule-based thresholds
+  rename_rate_threshold: 20     # renames per window triggering alert
+  delete_rate_threshold: 15
+  write_rate_threshold: 50
+  entropy_threshold: 7.0        # Shannon entropy of renamed file extensions
+  unique_extensions_threshold: 5
+  rules:
+    ext_change_burst_threshold: 15
+    write_count_threshold: 30
+    min_distinct_files_threshold: 10
+    entropy_written_threshold: 7.0
+    ransom_note_threshold: 2
+    ransom_note_dirs_threshold: 2
+    delete_after_copy_threshold: 10
+    baseline_files_changed: 10
+    baseline_ops_per_sec: 15.0
+
+ml:
+  model_path: "ml/artifacts/model.json"
+  feature_version: 1
+  score_threshold: 0.85         # probability above which ML fires an alert
+
+response:
+  backend: "fake"               # "fake" (simulation/test) | "linux" (nftables/iptables)
+  mode: "shadow"                # "shadow" (alert-only) | "enforce_temp" | "enforce_strict"
+  block_ttl_minutes: 15
+  rate_limit_per_minute: 10     # max new blocks per minute
+  max_active_blocks: 20         # max concurrent blocked clients
+  min_ttl_seconds: 10
+  max_ttl_seconds: 86400
+  allowlist:                    # IPs that are NEVER blocked
+    - "127.0.0.1"
+    - "::1"
+
+snapshot:
+  backend: "portable"          # "portable" | "rsync" | "fake"
+  snapshot_dir: "snapshots/"
+  max_snapshots: 10
+  safety_margin_seconds: 5.0
+
+dashboard:
+  api_base_url: "http://127.0.0.1:8000"
+  refresh_interval_seconds: 5
+
+assistant:
+  provider: "none"              # "none" | "openai" | "ollama"
+  model: ""
+  # API key must be set via SHAREGUARD__ASSISTANT__API_KEY env var — never here
+
+health:
+  cache_ttl_seconds: 60.0
+  restore_test:
+    rate_limit_seconds: 60.0
+    sample_file_count: 5
+    max_file_size_bytes: 10485760 # 10 MB cap per file
+    schedule_interval_hours: 168 # weekly (7 days)
+  weights:
+    audit_logging: 15
+    smb_protocol: 15
+    guest_access: 10
+    snapshots: 15
+    restore_test: 15
+    canary_files: 10
+    disk_space: 10
+    network_exposure: 5
+    safety_settings: 5
+  thresholds:
+    snapshot_max_age_hours: 24.0
+    disk_free_warn_percent: 15.0
+

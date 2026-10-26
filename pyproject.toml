@@ -1,0 +1,55 @@
+[project]
+name = "shareguard"
+version = "0.1.0"
+description = "Ransomware guard for Samba (SMB) file servers"
+requires-python = ">=3.12"
+readme = "README.md"
+license = { text = "MIT" }
+
+[tool.setuptools.packages.find]
+where = ["server", "."]
+include = ["shareguard*", "lab*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["server", "lab", "ml", "dashboard", "scripts"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM"]
+ignore = ["E501", "SIM105", "B008"]  # line-length handled by formatter, allow try-except-pass in lab scripts, allow FastAPI Depends/Query in function defaults
+
+[tool.ruff.lint.per-file-ignores]
+"server/tests/*" = ["S101"]  # allow assert in tests
+"lab/tests/*" = ["S101"]    # allow assert in tests
+"ml/*" = ["E402"]           # allow sys.path modification before imports in stand-alone scripts
+"scripts/*" = ["E402"]      # allow sys.path modification before imports in scripts
+
+[tool.pytest.ini_options]
+testpaths = ["server/tests", "lab/tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+timeout = 120
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+]
+
+[tool.coverage.run]
+source = ["server/shareguard"]
+omit = [
+    "server/shareguard/__main__.py",
+    "server/shareguard/tools/*",
+]
+
+[tool.coverage.report]
+show_missing = true
+precision = 1
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+warn_unused_ignores = false
+show_error_codes = true
+# Documented third-party modules without type stubs:
+# xgboost, shap, sklearn, joblib, matplotlib, plotly, pyarrow, streamlit

@@ -1,0 +1,61 @@
+[Unit]
+Description=ShareGuard – Ransomware Guard for Samba File Servers
+Documentation=https://github.com/your-org/shareguard
+After=network.target smbd.service
+Wants=smbd.service
+
+[Service]
+Type=simple
+User=shareguard
+Group=shareguard
+# adm: reads Samba audit logs (/var/log/samba/)
+# officeusers: reads/writes share files for snapshots and restore operations
+SupplementaryGroups=adm officeusers
+
+WorkingDirectory=/opt/shareguard
+Environment="PATH=/opt/shareguard/.venv/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="PYTHONUNBUFFERED=1"
+EnvironmentFile=-/etc/default/shareguard
+ExecStart=/opt/shareguard/.venv/bin/uvicorn shareguard.api:app --host 127.0.0.1 --port 8000
+
+Restart=always
+RestartSec=5s
+KillMode=mixed
+TimeoutStopSec=15s
+
+# ---------------------------------------------------------------------------
+# Security Sandboxing & Least-Privilege Invariants
+# ---------------------------------------------------------------------------
+# TRADE-OFF DOCUMENTATION:
+# NoNewPrivileges is explicitly set to 'no' because ShareGuard runs as a
+# non-root user (shareguard) and must invoke the audited, root-owned helper
+# (/usr/local/bin/shareguard-helper) via sudo to manipulate nftables and terminate
+# attacker smbd sessions. Setting NoNewPrivileges=yes blocks the SUID bit on sudo,
+# preventing necessary privileged defense actions.
+#
+# Compensating controls applied below strictly isolate the daemon:
+NoNewPrivileges=no
+
+# Filesystem protections
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictRealtime=yes
+LockPersonality=yes
+
+# Explicit filesystem access grants
+# - /var/lib/shareguard: snapshot store (mode 0700) and runtime metadata
+# - /var/log/shareguard: dedicated application log directory
+# - /srv/samba/share: protected share root for file recovery
+ReadWritePaths=/var/lib/shareguard /var/log/shareguard /srv/samba/share
+# Read-only access to Samba logs and application bundle
+ReadOnlyPaths=/var/log/samba /opt/shareguard
+
+# System call architecture restriction
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

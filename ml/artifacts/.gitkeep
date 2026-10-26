@@ -1,0 +1,3 @@
+# ml/artifacts/.gitkeep
+# Trained model files (.json, .pkl) are gitignored.
+# Only this placeholder is committed.
